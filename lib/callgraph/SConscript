@@ -3,4 +3,4 @@ Import('env')
 LIBRARYNAME="CanaryCallGraph"
 LIBRARYNAME=env['BIN']+"/"+LIBRARYNAME
 
-env.Library(LIBRARYNAME, Glob('*.cpp'))
+env.SharedLibrary(LIBRARYNAME, Glob('*.cpp'))

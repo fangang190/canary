@@ -441,7 +441,7 @@ void DyckAliasAnalysis::getEscapedPointersTo(set<DyckVertex*>* ret, Function * f
 bool DyckAliasAnalysis::runOnModule(Module & M) {
     InitializeAliasAnalysis(this);
 
-    AAAnalyzer* aaa = new AAAnalyzer(&M, this, dyck_graph);
+    aaa = new AAAnalyzer(&M, this, dyck_graph);
 
     /// step 1: intra-procedure analysis
     aaa->start_intra_procedure_analysis();
@@ -482,7 +482,7 @@ bool DyckAliasAnalysis::runOnModule(Module & M) {
     set<Instruction*> unhandled_calls; // Currently, it is used only for canary-record-transformer
     aaa->getUnhandledCallInstructions(&unhandled_calls);
 
-    delete aaa;
+    //delete aaa;
 
     if (PrintAliasSetInformation) {
         outs() << "Printing alias set information...\n";
