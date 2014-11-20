@@ -5,3 +5,4 @@ LIBRARYNAME=env['BIN']+"/"+LIBRARYNAME
 
 
 env.SharedLibrary(LIBRARYNAME, Glob('*.cpp'))
+

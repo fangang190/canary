@@ -7,13 +7,22 @@
 
 #define ARRAY_SIMPLIFIED
 
-AAAnalyzer::AAAnalyzer(Module* m, AliasAnalysis* a, DyckGraph* d) {
+AAAnalyzer::AAAnalyzer(Module* m, AliasAnalysis* a, DyckGraph* d, DyckCallGraph* cg) {
     module = m;
     aa = a;
     dgraph = d;
+
+    if (((DyckAliasAnalysis*) aa)->callGraphPreserved()) {
+        callgraph = cg;
+    } else {
+        callgraph = new DyckCallGraph;
+    }
 }
 
 AAAnalyzer::~AAAnalyzer() {
+    if (!((DyckAliasAnalysis*) aa)->callGraphPreserved()) {
+        delete callgraph;
+    }
 }
 
 void AAAnalyzer::start_intra_procedure_analysis() {
@@ -43,15 +52,15 @@ void AAAnalyzer::start_inter_procedure_analysis() {
 }
 
 void AAAnalyzer::end_inter_procedure_analysis() {
-    set<FunctionWrapper *>::iterator dfit = callgraph.begin();
-    while (dfit != callgraph.end()) {
-        FunctionWrapper * df = *dfit;
+    auto dfit = callgraph->begin();
+    while (dfit != callgraph->end()) {
+        DyckCallGraphNode * df = dfit->second;
         set<PointerCall*>& unhandled = df->getPointerCalls();
 
-        set<PointerCall*>::iterator pcit = unhandled.begin();
+        auto pcit = unhandled.begin();
         while (pcit != unhandled.end()) {
             PointerCall* pc = *pcit;
-            if (!pc->mayAliasedCallees.empty() && pc->instruction != NULL) // if it is handled, we assume there exists one function definitely aliases with the function pointer
+            if (!pc->mayAliasedCallees.empty() && pc->instruction != NULL)
                 unhandled_call_insts.insert((Instruction*) pc->instruction);
 
             pcit++;
@@ -104,9 +113,15 @@ void AAAnalyzer::end_inter_procedure_analysis() {
 
 bool AAAnalyzer::intra_procedure_analysis() {
     long instNum = 0;
+    long intrinsicsNum = 0;
     for (ilist_iterator<Function> iterF = module->getFunctionList().begin(); iterF != module->getFunctionList().end(); iterF++) {
         Function* f = iterF;
-        FunctionWrapper* df = callgraph.getFunctionWrapper(f);
+        if (f->isIntrinsic()) {
+            // intrinsics are handled as instructions
+            intrinsicsNum++;
+            continue;
+        }
+        DyckCallGraphNode* df = callgraph->getOrInsertFunction(f);
         for (ilist_iterator<BasicBlock> iterB = f->getBasicBlockList().begin(); iterB != f->getBasicBlockList().end(); iterB++) {
             for (ilist_iterator<Instruction> iterI = iterB->getInstList().begin(); iterI != iterB->getInstList().end(); iterI++) {
                 Instruction *inst = iterI;
@@ -117,7 +132,7 @@ bool AAAnalyzer::intra_procedure_analysis() {
         }
     }
     outs() << "# Instructions: " << instNum << "\n";
-    outs() << "# Functions: " << module->getFunctionList().size() << "\n";
+    outs() << "# Functions: " << module->getFunctionList().size() - intrinsicsNum << "\n";
     return true; // finished
 }
 
@@ -129,9 +144,9 @@ bool AAAnalyzer::inter_procedure_analysis() {
     FUNCTION_COUNT = 0;
 
     bool finished = true;
-    set<FunctionWrapper *>::iterator dfit = callgraph.begin();
-    while (dfit != callgraph.end()) {
-        FunctionWrapper * df = *dfit;
+    auto dfit = callgraph->begin();
+    while (dfit != callgraph->end()) {
+        DyckCallGraphNode * df = dfit->second;
 
         if (handle_functions(df)) {
             finished = false;
@@ -660,7 +675,7 @@ set<Function*>* AAAnalyzer::getCompatibleFunctions(FunctionType * fty) {
     return &(ftn->root->compatibleFuncs);
 }
 
-void AAAnalyzer::handle_inst(Instruction *inst, FunctionWrapper * parent_func) {
+void AAAnalyzer::handle_inst(Instruction *inst, DyckCallGraphNode * parent_func) {
     //outs()<<*inst<<"\n"; outs().flush();
     switch (inst->getOpcode()) {
             // common/bitwise binary operations
@@ -945,7 +960,7 @@ void AAAnalyzer::handle_inst(Instruction *inst, FunctionWrapper * parent_func) {
     }
 }
 
-void AAAnalyzer::handle_invoke_call_inst(Value* ret, Value* cv, vector<Value*>* args, FunctionWrapper* parent) {
+void AAAnalyzer::handle_invoke_call_inst(Value* ret, Value* cv, vector<Value*>* args, DyckCallGraphNode* parent) {
     if (isa<Function>(cv)) {
         if (((Function*) cv)->isIntrinsic()) {
             handle_instrinsic((Instruction*) ret);
@@ -991,7 +1006,7 @@ void AAAnalyzer::handle_invoke_call_inst(Value* ret, Value* cv, vector<Value*>* 
 
 // ci is callinst or invokeinst
 
-void AAAnalyzer::handle_common_function_call(Call* c, FunctionWrapper* caller, FunctionWrapper* callee) {
+void AAAnalyzer::handle_common_function_call(Call* c, DyckCallGraphNode* caller, DyckCallGraphNode* callee) {
     //landingpad<->resume
     if (c->instruction != NULL) {
         Value* lpd = caller->getLandingPad(c->instruction);
@@ -1068,7 +1083,7 @@ void AAAnalyzer::handle_common_function_call(Call* c, FunctionWrapper* caller, F
     }
 }
 
-bool AAAnalyzer::handle_functions(FunctionWrapper* caller) {
+bool AAAnalyzer::handle_functions(DyckCallGraphNode* caller) {
     FUNCTION_COUNT++;
 
     bool ret = false;
@@ -1080,17 +1095,17 @@ bool AAAnalyzer::handle_functions(FunctionWrapper* caller) {
     // print in console
     int COMCALL_TOTAL = callInsts.size();
     int COMCALL_COUNT = 0;
-    if (COMCALL_TOTAL == 0) outs() << "Iteration " << INTERT << "... Handling Function #" << FUNCTION_COUNT << "... " << "100%,                      \r";
+    if (COMCALL_TOTAL == 0) outs() << "Iteration " << INTERT << "... Handling Function #" << FUNCTION_COUNT << "... " << "100%,         \r";
 
     while (cit != callInsts.end()) {
         // print in console
-        outs() << "Iteration " << INTERT << "... Handling Function #" << FUNCTION_COUNT << "... " << ((++COMCALL_COUNT)*100 / COMCALL_TOTAL) << "%,                      \r";
+        outs() << "Iteration " << INTERT << "... Handling Function #" << FUNCTION_COUNT << "... " << ((++COMCALL_COUNT)*100 / COMCALL_TOTAL) << "%,         \r";
 
         Value * cv = (*cit)->calledValue;
 
         if (isa<Function>(cv)) {
             ret = true;
-            handle_common_function_call((*cit), caller, callgraph.getFunctionWrapper((Function*) cv));
+            handle_common_function_call((*cit), caller, callgraph->getOrInsertFunction((Function*) cv));
 
             commonCalls->insert(*cit);
 
@@ -1109,11 +1124,11 @@ bool AAAnalyzer::handle_functions(FunctionWrapper* caller) {
     // print in console
     int PTCALL_TOTAL = pointercalls.size();
     int PTCALL_COUNT = 0;
-    if (PTCALL_TOTAL == 0) outs() << "Iteration " << INTERT << "... Handling Function #" << FUNCTION_COUNT << "... 100%, " << "100%, 100%.                     \r";
+    if (PTCALL_TOTAL == 0) outs() << "Iteration " << INTERT << "... Handling Function #" << FUNCTION_COUNT << "... 100%, " << "100%, 100%.         \r";
 
     while (mit != pointercalls.end()) {
         // print in console
-        int percentage = ((++PTCALL_COUNT)*100 / PTCALL_TOTAL) ;
+        int percentage = ((++PTCALL_COUNT)*100 / PTCALL_TOTAL);
         outs() << "Iteration " << INTERT << "... Handling Function #" << FUNCTION_COUNT << "... 100%, " << percentage << "%, \r";
 
         //Value * inst = mit->first;
@@ -1124,19 +1139,19 @@ bool AAAnalyzer::handle_functions(FunctionWrapper* caller) {
         // print in console
         int CAND_TOTAL = cands->size();
         int CAND_COUNT = 0;
-        if (CAND_TOTAL == 0) outs() << "100%.                     \r";
+        if (CAND_TOTAL == 0) outs() << "Iteration " << INTERT << "... Handling Function #" << FUNCTION_COUNT << "... 100%, " << "100%, 100%.         \r";
 
         // cv, numOfArguments
         set<Function*>::iterator pfit = cands->begin();
         while (pfit != cands->end()) {
             // print in console
-            outs() << "Iteration " << INTERT << "... Handling Function #" << FUNCTION_COUNT << "... 100%, " << percentage << "%, " << ((100 * (++CAND_COUNT)) / CAND_TOTAL) << "%                                 \r";
+            outs() << "Iteration " << INTERT << "... Handling Function #" << FUNCTION_COUNT << "... 100%, " << percentage << "%, " << ((100 * (++CAND_COUNT)) / CAND_TOTAL) << "%         \r";
 
             AliasAnalysis::AliasResult ar = ((DyckAliasAnalysis*) aa)->function_alias(*pfit, pcall->calledValue);
             if (ar == AliasAnalysis::MayAlias || ar == AliasAnalysis::MustAlias) {
                 ret = true;
 
-                handle_common_function_call(pcall, caller, callgraph.getFunctionWrapper(*pfit));
+                handle_common_function_call(pcall, caller, callgraph->getOrInsertFunction(*pfit));
 
                 maycallfuncs->insert(*pfit);
 
@@ -1148,7 +1163,7 @@ bool AAAnalyzer::handle_functions(FunctionWrapper* caller) {
                     cands->clear();
 
                     // print in console
-                    outs() << "Iteration " << INTERT << "... Handling Function #" << FUNCTION_COUNT << "... 100%, " << "100%, 100%.                                        \r";
+                    outs() << "Iteration " << INTERT << "... Handling Function #" << FUNCTION_COUNT << "... 100%, " << "100%, 100%.         \r";
                     break;
                 }
             } else {
@@ -1162,7 +1177,7 @@ bool AAAnalyzer::handle_functions(FunctionWrapper* caller) {
     return ret;
 }
 
-void AAAnalyzer::handle_lib_invoke_call_inst(Value* ret, Function* f, vector<Value*>* args, FunctionWrapper* parent) {
+void AAAnalyzer::handle_lib_invoke_call_inst(Value* ret, Function* f, vector<Value*>* args, DyckCallGraphNode* parent) {
     // args must be the real arguments, not the parameters.
     if (!f->empty() || f->isIntrinsic())
         return;
@@ -1235,7 +1250,7 @@ void AAAnalyzer::handle_lib_invoke_call_inst(Value* ret, Function* f, vector<Val
                 Value * ret = NULL;
                 vector<Value*> xargs;
                 xargs.push_back(args->at(3));
-                FunctionWrapper* parent = callgraph.getFunctionWrapper(f);
+                DyckCallGraphNode* parent = callgraph->getOrInsertFunction(f);
                 this->handle_invoke_call_inst(ret, args->at(2), &xargs, parent);
             }
         }

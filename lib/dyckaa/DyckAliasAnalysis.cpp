@@ -4,46 +4,33 @@
  */
 
 #include "AAAnalyzer.h"
-#include "Transformer.h"
-#include "Transformer4Leap.h"
-#include "Transformer4Trace.h"
-#include "Transformer4CanaryRecord.h"
-#include "Transformer4CanaryReplay.h"
 
 #include "DyckAliasAnalysis.h"
-#include "CallGraph.h"
+#include "DyckCallGraph.h"
 
 #include <stdio.h>
 #include <algorithm>
 #include <stack>
 
 // cananry options
-static cl::opt<bool>
-CanaryRecordTransformer("canary-record-transformer", cl::init(false), cl::Hidden,
-        cl::desc("Transform programs using canary record transformer."));
-
-static cl::opt<bool>
-CanaryReplayTransformer("canary-replay-transformer", cl::init(false), cl::Hidden,
-        cl::desc("Transform programs using canary replay transformer."));
-
-/*static cl::opt<std::string> LockSmithDumpFile("locksmith-dump-file",
-        cl::desc("The Locksmith dump file using \"cilly --merge --list-shared --list-guardedby\""),
-        cl::Hidden);*/
+//static cl::opt<bool>
+//CanaryRecordTransformer("canary-record-transformer", cl::init(false), cl::Hidden,
+//        cl::desc("Transform programs using canary record transformer."));
+//
+//static cl::opt<bool>
+//CanaryReplayTransformer("canary-replay-transformer", cl::init(false), cl::Hidden,
+//        cl::desc("Transform programs using canary replay transformer."));
 
 static cl::opt<bool>
 PrintAliasSetInformation("print-alias-set-info", cl::init(false), cl::Hidden,
         cl::desc("Output all alias sets, their relations and the evaluation results."));
 
 static cl::opt<bool>
-LeapTransformer("leap-transformer", cl::init(false), cl::Hidden,
-        cl::desc("Transform programs using Leap transformer."));
+PreserveCallGraph("preserve-dyck-callgraph", cl::init(false), cl::Hidden,
+        cl::desc("Preserve the call graph for usage in other passes."));
 
 static cl::opt<bool>
-TraceTransformer("trace-transformer", cl::init(false), cl::Hidden,
-        cl::desc("Transform programs to record a trace."));
-
-static cl::opt<bool>
-DotCallGraph("dot-may-callgraph", cl::init(false), cl::Hidden,
+DotCallGraph("dot-dyck-callgraph", cl::init(false), cl::Hidden,
         cl::desc("Calculate the program's call graph and output into a \"dot\" file."));
 
 static cl::opt<bool>
@@ -71,10 +58,8 @@ static bool notDifferentParent(const Value *O1, const Value *O2) {
 DyckAliasAnalysis::DyckAliasAnalysis() : ModulePass(ID) {
     dyck_graph = new DyckGraph;
 
-    if (LeapTransformer && TraceTransformer
-            && CanaryRecordTransformer && CanaryReplayTransformer) {
-        errs() << "Error: you cannot use different transformers together.\n";
-        exit(1);
+    if (this->callGraphPreserved()) {
+        call_graph = new DyckCallGraph;
     }
 }
 
@@ -146,9 +131,9 @@ DyckAliasAnalysis::AliasResult DyckAliasAnalysis::function_alias(const Function*
         }
 
         if (isa<Function>(cvcopy)) {
-            if (cvcopy == function){
+            if (cvcopy == function) {
                 return MustAlias;
-            }else{
+            } else {
                 return NoAlias;
             }
         } else {
@@ -169,7 +154,7 @@ DyckAliasAnalysis::AliasResult DyckAliasAnalysis::function_alias(const Function*
     return ar;
 }
 
-RegisterPass<DyckAliasAnalysis> X("dyckaa", "Alias Analysis based on Qirun's PLDI 2013 paper");
+RegisterPass<DyckAliasAnalysis> X("dyckaa", "Alias Analysis based on PLDI 2013 paper: Qirun Zhang, Michael R. Lyu, Hao Yuan, and Zhendong Su. Fast Algorithms for Dyck-CFL-Reachability with Applications to Alias Analysis.");
 RegisterAnalysisGroup<AliasAnalysis> Y(X);
 
 // Register this pass...
@@ -330,6 +315,17 @@ void DyckAliasAnalysis::fromDyckVertexToValue(set<DyckVertex*>& from, set<Value*
     }
 }
 
+void DyckAliasAnalysis::getEscapedPointersFrom(set<Value*>* ret, Value * from) {
+    if (ret == NULL || from == NULL || (isa<Argument>(from) && ((Argument*) from)->getParent()->empty())) {
+        errs() << "[ERROR] In getEscapingPointers: ret or from are null! Or from is an empty function's argument\n";
+        return;
+    }
+
+    set<DyckVertex*> temp;
+    getEscapedPointersFrom(&temp, from);
+    this->fromDyckVertexToValue(temp, *ret);
+}
+
 void DyckAliasAnalysis::getEscapedPointersFrom(set<DyckVertex*>* ret, Value * from) {
     if (ret == NULL || from == NULL || (isa<Argument>(from) && ((Argument*) from)->getParent()->empty())) {
         errs() << "[ERROR] In getEscapingPointers: ret or from are null! Or from is an empty function's argument\n";
@@ -365,6 +361,17 @@ void DyckAliasAnalysis::getEscapedPointersFrom(set<DyckVertex*>* ret, Value * fr
     }
 
     ret->insert(visited.begin(), visited.end());
+}
+
+void DyckAliasAnalysis::getEscapedPointersTo(set<Value*>* ret, Function * func) {
+    if (ret == NULL || func == NULL) {
+        errs() << "Warning in getEscapingPointers: ret or func are null!\n";
+        return;
+    }
+
+    set<DyckVertex*> temp;
+    getEscapedPointersTo(&temp, func);
+    this->fromDyckVertexToValue(temp, *ret);
 }
 
 void DyckAliasAnalysis::getEscapedPointersTo(set<DyckVertex*>* ret, Function * func) {
@@ -438,10 +445,18 @@ void DyckAliasAnalysis::getEscapedPointersTo(set<DyckVertex*>* ret, Function * f
     ret->insert(visited.begin(), visited.end());
 }
 
+bool DyckAliasAnalysis::callGraphPreserved(){
+    return PreserveCallGraph;
+}
+
+DyckCallGraph* DyckAliasAnalysis::getCallGraph(){
+    return call_graph;
+}
+
 bool DyckAliasAnalysis::runOnModule(Module & M) {
     InitializeAliasAnalysis(this);
 
-    aaa = new AAAnalyzer(&M, this, dyck_graph);
+    AAAnalyzer* aaa = new AAAnalyzer(&M, this, dyck_graph, call_graph);
 
     /// step 1: intra-procedure analysis
     aaa->start_intra_procedure_analysis();
@@ -466,14 +481,14 @@ bool DyckAliasAnalysis::runOnModule(Module & M) {
 
     /* call graph */
     if (DotCallGraph) {
-        CallGraph *cg = aaa->getCallGraph();
+        DyckCallGraph *cg = aaa->getCallGraph();
         outs() << "Printing call graph...\n";
         cg->dotCallGraph(M.getModuleIdentifier());
         outs() << "Done!\n\n";
     }
 
     if (CountFP) {
-        CallGraph *cg = aaa->getCallGraph();
+        DyckCallGraph *cg = aaa->getCallGraph();
         outs() << "Printing function pointer information...\n";
         cg->printFunctionPointersInformation(M.getModuleIdentifier());
         outs() << "Done!\n\n";
@@ -482,7 +497,7 @@ bool DyckAliasAnalysis::runOnModule(Module & M) {
     set<Instruction*> unhandled_calls; // Currently, it is used only for canary-record-transformer
     aaa->getUnhandledCallInstructions(&unhandled_calls);
 
-    //delete aaa;
+    delete aaa;
 
     if (PrintAliasSetInformation) {
         outs() << "Printing alias set information...\n";
@@ -491,143 +506,143 @@ bool DyckAliasAnalysis::runOnModule(Module & M) {
     }
 
     /* instrumentation */
-    if (TraceTransformer || LeapTransformer
-            || CanaryRecordTransformer || CanaryReplayTransformer) {
-        outs() << ("Thread escape analysis ...\n");
-        set<DyckVertex*> svs;
-        set<Value*> llvm_svs;
-        this->getEscapedPointersTo(&svs, M.getFunction("pthread_create"));
-        fromDyckVertexToValue(svs, llvm_svs);
-        outs() << "Done!\n\n";
-
-        set<DyckVertex*> lvs;
-        set<Value *> llvm_lvs;
-
-        set<Function*> unsafe_ex_functions;
-
-        Transformer * robot = NULL;
-        if (LeapTransformer) {
-            robot = new Transformer4Leap(&M, &llvm_svs, this->getDataLayout()->getPointerSize());
-            outs() << ("Start transforming using leap-transformer ...\n");
-        } else if (TraceTransformer) {
-            robot = new Transformer4Trace(&M, &llvm_svs, this->getDataLayout()->getPointerSize());
-            outs() << ("Start transforming using trace-transformer ...\n");
-        } else if (CanaryRecordTransformer || CanaryReplayTransformer) {
-            outs() << "External call escape analysis ...\n";
-            // get unsafe_ex_functions
-            for (ilist_iterator<Function> iterF = M.getFunctionList().begin(); iterF != M.getFunctionList().end(); iterF++) {
-                Function* f = iterF;
-                if (Transformer4CanaryRecord::isUnsafeExternalLibraryFunction(f)) {
-                    unsafe_ex_functions.insert(f);
-                }
-            }
-
-            for (ilist_iterator<Function> iterF = M.getFunctionList().begin(); iterF != M.getFunctionList().end(); iterF++) {
-                Function* f = iterF;
-                for (ilist_iterator<BasicBlock> iterB = f->getBasicBlockList().begin(); iterB != f->getBasicBlockList().end(); iterB++) {
-                    for (ilist_iterator<Instruction> iterI = iterB->getInstList().begin(); iterI != iterB->getInstList().end(); iterI++) {
-                        Instruction *rawInst = iterI;
-                        if (isa<CallInst> (rawInst)) {
-                            CallInst *inst = (CallInst*) rawInst; // all invokes are lowered to call
-
-                            if (inst->isInlineAsm()) {
-                                DEBUG_WITH_TYPE("asm", errs() << "[Inline Asm] " << *inst << "\n");
-                            }
-
-                            set<Function*> mayAliasedFunctions;
-                            this->get_aliased_functions(&mayAliasedFunctions, &unsafe_ex_functions, inst->getCalledValue(), &M);
-                            if (mayAliasedFunctions.empty() && !unhandled_calls.count(inst)) {
-                                continue; // an internal call
-                            }
-
-                            //args escape analysis
-                            for (unsigned x = 0; x < inst->getNumArgOperands(); x++) {
-                                bool constant = true && !unhandled_calls.count(inst);
-                                set<Function*>::iterator mafIt = mayAliasedFunctions.begin();
-                                while (mafIt != mayAliasedFunctions.end()) {
-                                    Function* maf = *mafIt;
-
-                                    iplist<Argument>& alt = maf->getArgumentList();
-                                    iplist<Argument>::iterator altIt = alt.begin();
-                                    unsigned y = 0;
-                                    while (y < x) {
-                                        altIt++;
-                                        if (altIt == alt.end()) {
-                                            break;
-                                        }
-                                        y++;
-                                    }
-
-                                    if (!maf->onlyReadsMemory() && ((altIt != alt.end() &&!altIt->onlyReadsMemory()) || altIt == alt.end())) {
-                                        constant = false;
-                                        break;
-                                    }
-
-                                    mafIt++;
-                                }
-
-                                Value *argx = inst->getArgOperand(x);
-
-                                if (constant || isa<ConstantInt>(argx)) {
-                                    continue;
-                                }
-
-                                pair < DyckVertex*, bool> retpair = dyck_graph->retrieveDyckVertex(const_cast<Value*> (argx));
-                                DyckVertex * argxV = retpair.first->getRepresentative();
-                                if (!lvs.count(argxV)) {
-                                    // do escape analysis
-                                    set<DyckVertex*> tmp_lvs;
-                                    this->getEscapedPointersFrom(&tmp_lvs, argx);
-                                    lvs.insert(tmp_lvs.begin(), tmp_lvs.end());
-                                }
-                            }
-
-                            // return value escape analysis
-                            if (!inst->doesNotReturn()) {
-                                set<DyckVertex*> tmp_lvs;
-                                this->getEscapedPointersFrom(&tmp_lvs, inst);
-                                lvs.insert(tmp_lvs.begin(), tmp_lvs.end());
-                            }
-                        }
-                    }
-                }
-            }
-            DEBUG_WITH_TYPE("asm", errs() << "\n");
-
-            this->fromDyckVertexToValue(lvs, llvm_lvs);
-
-            outs() << "Done!\n\n";
-
-            // outs() << llvm_lvs.size() << "\n";
-            if (CanaryRecordTransformer) {
-                outs() << ("Start transforming using canary-record-transformer ...\n");
-                robot = new Transformer4CanaryRecord(&M, &llvm_svs, &llvm_lvs, &unhandled_calls, &unsafe_ex_functions, this->getDataLayout()->getPointerSize());
-            } else {
-                outs() << "[WARINING] The transformer is in progress\n";
-                robot = new Transformer4CanaryReplay(&M, &llvm_svs, this->getDataLayout()->getPointerSize());
-                outs() << ("Start transforming using canary-replay-transformer ...\n");
-            }
-        } else {
-            errs() << "[ERROR] unknown transformer\n";
-            exit(1);
-        }
-
-        robot->transform(*this);
-        outs() << "Done!\n\n";
-
-        if (LeapTransformer) {
-            outs() << "\nPleaase add -ltsxleaprecord or -lleaprecord / -lleapreplay for record / replay when you compile the transformed bitcode file to an executable file.\n";
-        } else if (TraceTransformer) {
-            outs() << "Please add -ltrace for trace analysis when you compile the transformed bitcode file to an executable file. Please use pecan_log_analyzer to predict crugs.\n";
-        } else if (CanaryRecordTransformer) {
-            outs() << "Maker sure your bitcode files are compiled using \"-c -emit-llvm -O2 -g -fno-vectorize -fno-slp-vectorize\" options\n";
-            outs() << "Please add -lcanaryrecord for record at link time\n";
-        }
-
-        delete robot;
-
-        return true;
-    }
+    //    if (TraceTransformer || LeapTransformer
+    //            || CanaryRecordTransformer || CanaryReplayTransformer) {
+    //        outs() << ("Thread escape analysis ...\n");
+    //        set<DyckVertex*> svs;
+    //        set<Value*> llvm_svs;
+    //        this->getEscapedPointersTo(&svs, M.getFunction("pthread_create"));
+    //        fromDyckVertexToValue(svs, llvm_svs);
+    //        outs() << "Done!\n\n";
+    //
+    //        set<DyckVertex*> lvs;
+    //        set<Value *> llvm_lvs;
+    //
+    //        set<Function*> unsafe_ex_functions;
+    //
+    //        Transformer * robot = NULL;
+    //        if (LeapTransformer) {
+    //            robot = new Transformer4Leap(&M, &llvm_svs, this->getDataLayout()->getPointerSize());
+    //            outs() << ("Start transforming using leap-transformer ...\n");
+    //        } else if (TraceTransformer) {
+    //            robot = new Transformer4Trace(&M, &llvm_svs, this->getDataLayout()->getPointerSize());
+    //            outs() << ("Start transforming using trace-transformer ...\n");
+    //        } else if (CanaryRecordTransformer || CanaryReplayTransformer) {
+    //            outs() << "External call escape analysis ...\n";
+    //            // get unsafe_ex_functions
+    //            for (ilist_iterator<Function> iterF = M.getFunctionList().begin(); iterF != M.getFunctionList().end(); iterF++) {
+    //                Function* f = iterF;
+    //                if (Transformer4CanaryRecord::isUnsafeExternalLibraryFunction(f)) {
+    //                    unsafe_ex_functions.insert(f);
+    //                }
+    //            }
+    //
+    //            for (ilist_iterator<Function> iterF = M.getFunctionList().begin(); iterF != M.getFunctionList().end(); iterF++) {
+    //                Function* f = iterF;
+    //                for (ilist_iterator<BasicBlock> iterB = f->getBasicBlockList().begin(); iterB != f->getBasicBlockList().end(); iterB++) {
+    //                    for (ilist_iterator<Instruction> iterI = iterB->getInstList().begin(); iterI != iterB->getInstList().end(); iterI++) {
+    //                        Instruction *rawInst = iterI;
+    //                        if (isa<CallInst> (rawInst)) {
+    //                            CallInst *inst = (CallInst*) rawInst; // all invokes are lowered to call
+    //
+    //                            if (inst->isInlineAsm()) {
+    //                                DEBUG_WITH_TYPE("asm", errs() << "[Inline Asm] " << *inst << "\n");
+    //                            }
+    //
+    //                            set<Function*> mayAliasedFunctions;
+    //                            this->get_aliased_functions(&mayAliasedFunctions, &unsafe_ex_functions, inst->getCalledValue(), &M);
+    //                            if (mayAliasedFunctions.empty() && !unhandled_calls.count(inst)) {
+    //                                continue; // an internal call
+    //                            }
+    //
+    //                            //args escape analysis
+    //                            for (unsigned x = 0; x < inst->getNumArgOperands(); x++) {
+    //                                bool constant = true && !unhandled_calls.count(inst);
+    //                                set<Function*>::iterator mafIt = mayAliasedFunctions.begin();
+    //                                while (mafIt != mayAliasedFunctions.end()) {
+    //                                    Function* maf = *mafIt;
+    //
+    //                                    iplist<Argument>& alt = maf->getArgumentList();
+    //                                    iplist<Argument>::iterator altIt = alt.begin();
+    //                                    unsigned y = 0;
+    //                                    while (y < x) {
+    //                                        altIt++;
+    //                                        if (altIt == alt.end()) {
+    //                                            break;
+    //                                        }
+    //                                        y++;
+    //                                    }
+    //
+    //                                    if (!maf->onlyReadsMemory() && ((altIt != alt.end() &&!altIt->onlyReadsMemory()) || altIt == alt.end())) {
+    //                                        constant = false;
+    //                                        break;
+    //                                    }
+    //
+    //                                    mafIt++;
+    //                                }
+    //
+    //                                Value *argx = inst->getArgOperand(x);
+    //
+    //                                if (constant || isa<ConstantInt>(argx)) {
+    //                                    continue;
+    //                                }
+    //
+    //                                pair < DyckVertex*, bool> retpair = dyck_graph->retrieveDyckVertex(const_cast<Value*> (argx));
+    //                                DyckVertex * argxV = retpair.first->getRepresentative();
+    //                                if (!lvs.count(argxV)) {
+    //                                    // do escape analysis
+    //                                    set<DyckVertex*> tmp_lvs;
+    //                                    this->getEscapedPointersFrom(&tmp_lvs, argx);
+    //                                    lvs.insert(tmp_lvs.begin(), tmp_lvs.end());
+    //                                }
+    //                            }
+    //
+    //                            // return value escape analysis
+    //                            if (!inst->doesNotReturn()) {
+    //                                set<DyckVertex*> tmp_lvs;
+    //                                this->getEscapedPointersFrom(&tmp_lvs, inst);
+    //                                lvs.insert(tmp_lvs.begin(), tmp_lvs.end());
+    //                            }
+    //                        }
+    //                    }
+    //                }
+    //            }
+    //            DEBUG_WITH_TYPE("asm", errs() << "\n");
+    //
+    //            this->fromDyckVertexToValue(lvs, llvm_lvs);
+    //
+    //            outs() << "Done!\n\n";
+    //
+    //            // outs() << llvm_lvs.size() << "\n";
+    //            if (CanaryRecordTransformer) {
+    //                outs() << ("Start transforming using canary-record-transformer ...\n");
+    //                robot = new Transformer4CanaryRecord(&M, &llvm_svs, &llvm_lvs, &unhandled_calls, &unsafe_ex_functions, this->getDataLayout()->getPointerSize());
+    //            } else {
+    //                outs() << "[WARINING] The transformer is in progress\n";
+    //                robot = new Transformer4CanaryReplay(&M, &llvm_svs, this->getDataLayout()->getPointerSize());
+    //                outs() << ("Start transforming using canary-replay-transformer ...\n");
+    //            }
+    //        } else {
+    //            errs() << "[ERROR] unknown transformer\n";
+    //            exit(1);
+    //        }
+    //
+    //        robot->transform(*this);
+    //        outs() << "Done!\n\n";
+    //
+    //        if (LeapTransformer) {
+    //            outs() << "\nPleaase add -ltsxleaprecord or -lleaprecord / -lleapreplay for record / replay when you compile the transformed bitcode file to an executable file.\n";
+    //        } else if (TraceTransformer) {
+    //            
+    //        } else if (CanaryRecordTransformer) {
+    //            outs() << "Maker sure your bitcode files are compiled using \"-c -emit-llvm -O2 -g -fno-vectorize -fno-slp-vectorize\" options\n";
+    //            outs() << "Please add -lcanaryrecord for record at link time\n";
+    //        }
+    //
+    //        delete robot;
+    //
+    //        return true;
+    //    }
     return false;
 }
 
@@ -636,6 +651,7 @@ void DyckAliasAnalysis::printAliasSetInformation(Module& M) {
     {
         set<DyckVertex*>& allreps = dyck_graph->getRepresentatives();
 
+        outs() << "Printing distribution.log...\n";
         FILE * log = fopen("distribution.log", "w+");
 
         vector<unsigned long> aliasSetSizes;
@@ -686,6 +702,7 @@ void DyckAliasAnalysis::printAliasSetInformation(Module& M) {
 
     /*if (DotAliasSet) */
     {
+        outs() << "Printing alias_rel.dot...\n";
         FILE * aliasRel = fopen("alias_rel.dot", "w");
         fprintf(aliasRel, "digraph rel{\n");
 
@@ -714,7 +731,7 @@ void DyckAliasAnalysis::printAliasSetInformation(Module& M) {
             map<void*, set<DyckVertex*>*>::iterator ovIt = outVs.begin();
 
             while (ovIt != outVs.end()) {
-                int label = *((int*) (ovIt->first));
+                void* label = ovIt->first;
                 set<DyckVertex*>* oVs = ovIt->second;
 
                 set<DyckVertex*>::iterator olIt = oVs->begin();
@@ -726,7 +743,7 @@ void DyckAliasAnalysis::printAliasSetInformation(Module& M) {
                     int idx1 = theMap[dv->getRepresentative()];
                     int idx2 = theMap[(*olIt)->getRepresentative()];
 
-                    fprintf(aliasRel, "a%d->a%d[label=%d];\n", idx1, idx2, label);
+                    fprintf(aliasRel, "a%d->a%d[label=%p];\n", idx1, idx2, label);
 
                     olIt++;
                 }
@@ -744,11 +761,14 @@ void DyckAliasAnalysis::printAliasSetInformation(Module& M) {
 
     /*if (OutputAliasSet)*/
     {
+        outs() << "Printing alias_sets.log...\n";
+        FILE * log = fopen("alias_sets.log", "w+");
+        
         set<DyckVertex*> svs;
         this->getEscapedPointersTo(&svs, M.getFunction("pthread_create"));
 
-        outs() << "================= Alias Sets ==================\n";
-        outs() << "===== {.} means pthread escaped alias set =====\n";
+        fprintf(log, "================= Alias Sets ==================\n");
+        fprintf(log, "===== {.} means pthread escaped alias set =====\n");
         int idx = 0;
         set<DyckVertex*>& reps = dyck_graph->getRepresentatives();
         set<DyckVertex*>::iterator repsIt = reps.begin();
@@ -768,16 +788,18 @@ void DyckAliasAnalysis::printAliasSetInformation(Module& M) {
                 val = (Value*) ((*eit)->getValue());
                 if (val != NULL) {
                     if (pthread_escaped) {
-                        outs() << "{" << idx << "} " << *val << "\n";
+                        fprintf(log, "{%d} %s", idx, val->getName().data());
                     } else {
-                        outs() << "[" << idx << "] " << *val << "\n";
+                        fprintf(log, "[%d] %s", idx, val->getName().data());
                     }
                 }
                 eit++;
             }
             repsIt++;
-            outs() << "------------------------------\n";
+            fprintf(log, "------------------------------\n");
         }
+        
+        fclose(log);
     }
 }
 
