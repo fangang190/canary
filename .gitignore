@@ -1,6 +1,7 @@
 *.a
 *.o
 *.bc
+*.ll
 bench/*.ll
 bench/*/*.ll
 bench/*/*/*.ll
